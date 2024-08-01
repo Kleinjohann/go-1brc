@@ -9,7 +9,6 @@ import (
     "os"
     "runtime/pprof"
     "slices"
-    "strconv"
     "strings"
     "time"
 )
@@ -18,14 +17,9 @@ var cpuprofile = flag.String("cpuprofile", "", "write cpu profile to `file`")
 
 type station_data struct {
     count int64
-    sum   float64
-    min   float64
-    max   float64
-}
-
-type line_data struct {
-    station     string
-    temperature float64
+    sum   int64
+    min   int64
+    max   int64
 }
 
 func read_data(filename string) map[string]station_data {
@@ -38,30 +32,45 @@ func read_data(filename string) map[string]station_data {
 
     scanner := bufio.NewScanner(file)
     datamap := make(map[string]station_data)
+    var station string
+    var temperature int64
 
     for scanner.Scan() {
-        current_data := parse_line(scanner.Text())
-        update_station_data(datamap, current_data)
+        station, temperature = parse_line(scanner.Bytes())
+        update_station_data(datamap, station, temperature)
     }
     return datamap
 }
 
-func parse_line(line string) line_data {
-    line_parts := strings.Split(line, ";")
-    station := line_parts[0]
-    temperature, err := strconv.ParseFloat(line_parts[1], 64)
-
-    if err != nil {
-        log.Fatal(err)
+func parse_line(line []byte) (string, int64) {
+    for i, char := range line {
+        if char == ';' {
+            station := string(line[:i])
+            temperature := parse_temperature(line[i+1:])
+            return station, temperature
+        }
     }
-
-    output := line_data{station: station, temperature: temperature}
-    return output
+    log.Fatal("Invalid line")
+    return "", 0
 }
 
-func update_station_data(datamap map[string]station_data, new_data line_data) {
-    station := new_data.station
-    temperature := new_data.temperature
+func parse_temperature(temperature []byte) int64 {
+    is_negative := false
+    result := int64(0)
+    for _, char := range temperature {
+        if char == '-' {
+            is_negative = true
+        } else if char != '.' {
+            result = result*10 + int64(char-'0')
+        }
+    }
+    if is_negative {
+        result *= -1
+    }
+    return result
+}
+
+func update_station_data(datamap map[string]station_data, station string, temperature int64) {
     if current_station_data, key_exists := datamap[station]; key_exists {
         current_station_data.count += 1
         current_station_data.min = min(current_station_data.min, temperature)
@@ -89,9 +98,9 @@ func compile_str(data map[string]station_data) string {
     slices.Sort(stations)
     output.WriteString("{")
     for i, station := range stations {
-        current_min := round(data[station].min)
-        current_max := round(data[station].max)
-        current_average := round(data[station].sum / float64(data[station].count))
+        current_min := round(float64(data[station].min) / 10.0)
+        current_max := round(float64(data[station].max) / 10.0)
+        current_average := round(float64(data[station].sum) / 10.0 / float64(data[station].count))
         output.WriteString(fmt.Sprintf("%s=%.1f/%.1f/%.1f", station, current_min, current_average, current_max))
         if i < num_stations-1 {
             output.WriteString(", ")
