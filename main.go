@@ -1,15 +1,17 @@
 package main
 
 import (
-    "bufio"
+    "bytes"
     "flag"
     "fmt"
     "log"
     "math"
     "os"
+    "runtime"
     "runtime/pprof"
     "slices"
     "strings"
+    "sync"
     "time"
 )
 
@@ -30,28 +32,78 @@ func read_data(filename string) map[string]station_data {
         log.Fatal(err)
     }
 
-    scanner := bufio.NewScanner(file)
     datamap := make(map[string]station_data)
-    var station string
-    var temperature int64
+    chunk_size := 1024 * 1024
+    buffer := make([]byte, chunk_size)
+    carry_over := make([]byte, 0, chunk_size)
+    num_workers := runtime.NumCPU() - 1
+    chunks_to_process := make(chan []byte, num_workers * 2)
+    results_to_merge := make(chan map[string]station_data, num_workers)
+    var wait_group sync.WaitGroup
 
-    for scanner.Scan() {
-        station, temperature = parse_line(scanner.Bytes())
-        update_station_data(datamap, station, temperature)
+    // spawn workers to process chunks
+    for i := 0; i < num_workers; i++ {
+        wait_group.Add(1)
+        go func() {
+            defer wait_group.Done()
+            for chunk := range chunks_to_process {
+                results_to_merge <- process_chunk(chunk)
+            }
+        }()
+    }
+
+    // read file in chunks and send them to workers
+    go func() {
+        for {
+            read_bytes, err := file.Read(buffer)
+            if read_bytes == 0 {
+                break
+            }
+            if err != nil {
+                log.Fatal(err)
+            }
+            // find last newline in buffer
+            last_newline := bytes.LastIndexByte(buffer[:read_bytes], '\n')
+            if last_newline == -1 {
+                log.Fatal("No newline found in chunk")
+            }
+            chunk_to_send := make([]byte, chunk_size)
+            chunk_to_send = append(carry_over, buffer[:last_newline+1]...)
+            chunks_to_process <- chunk_to_send
+            carry_over = make([]byte, read_bytes-last_newline-1)
+            copy(carry_over, buffer[last_newline+1:read_bytes])
+        }
+
+        // close channel and wait for workers to finish
+        close(chunks_to_process)
+        wait_group.Wait()
+        close(results_to_merge)
+    }()
+
+    // merge results from workers
+    for result := range results_to_merge {
+        merge_station_data(datamap, result)
     }
     return datamap
 }
 
-func parse_line(line []byte) (string, int64) {
-    for i, char := range line {
+func process_chunk(chunk []byte) map[string]station_data {
+    var station string
+    var temperature int64
+    chunk_data := make(map[string]station_data)
+    last_i := 0
+    for i, char := range chunk {
         if char == ';' {
-            station := string(line[:i])
-            temperature := parse_temperature(line[i+1:])
-            return station, temperature
+            station = string(chunk[last_i:i])
+            last_i = i + 1
+        }
+        if char == '\n' {
+            temperature = parse_temperature(chunk[last_i:i])
+            last_i = i + 1
+            update_station_data(chunk_data, station, temperature)
         }
     }
-    log.Fatal("Invalid line")
-    return "", 0
+    return chunk_data
 }
 
 func parse_temperature(temperature []byte) int64 {
@@ -83,6 +135,20 @@ func update_station_data(datamap map[string]station_data, station string, temper
             min:   temperature,
             max:   temperature,
             sum:   temperature}
+    }
+}
+
+func merge_station_data(datamap map[string]station_data, chunk_data map[string]station_data) {
+    for station, data := range chunk_data {
+        if current_station_data, key_exists := datamap[station]; key_exists {
+            current_station_data.count += data.count
+            current_station_data.min = min(current_station_data.min, data.min)
+            current_station_data.max = max(current_station_data.max, data.max)
+            current_station_data.sum += data.sum
+            datamap[station] = current_station_data
+        } else {
+            datamap[station] = data
+        }
     }
 }
 

@@ -16,4 +16,10 @@ Benchmarks are run on a Framework Laptop with an Intel Core i5-1340P, 32GB DDR4-
 
 - custom parser to read station name and temperature
 - use `int64` for temperatures
-- no wrapper struct for parsed data
+- abolish wrapper struct for parsed data
+
+## Goroutines: 25s
+
+- one routine to read file in chunks
+- `NumCPU - 1` routines to process chunks
+- split lines manually instead of using `Scanner.Scan`
